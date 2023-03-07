@@ -12,7 +12,7 @@ pub mod lexer;
 pub mod error;
 pub mod config;
 
-type ParsingResult = Result<(Vec<ASTNode>, Vec<Token>), (ParseError, Token)>;
+pub type ParsingResult = Result<(Vec<ASTNode>, Vec<Token>), (ParseError, Token)>;
 type ExpressionResult = SnippetParsingResult<Expression>;
 
 pub enum SnippetParsingResult<T> {
@@ -57,23 +57,13 @@ macro_rules! parse {
 /// Otherwise, execute $not_matched statement / block, or return parsing failure
 /// by default.
 macro_rules! expect {
-    ($tokens:ident, $parsed_tokens:ident, $body:tt) => {{
-        let token = $tokens.last().map(|i| { i.clone() });
-
-        expect!($tokens, $parsed_tokens, token, true, $body)
-    }};
-
-    ($tokens:ident, $parsed_tokens:ident, $current_token:expr, $pop_token:expr, {
+    ($tokens:ident, $parsed_tokens:ident, {
         $($pattern:pat $(if $cond:expr)? => $result:stmt,)+ $(? => $not_matched:stmt)?
     }) => {
-        match $current_token.clone() {
+        match $tokens.last().map(|i| { i.clone() }) {
             $(
                 Some($pattern) $(if $cond)? => {
-                    let token = if $pop_token {
-                        $tokens.pop()
-                    } else {
-                        $current_token
-                    };
+                    let token = $tokens.pop();
                     $parsed_tokens.push(token.unwrap());
                     $result
                 },
@@ -89,26 +79,10 @@ macro_rules! expect {
     }
 }
 
-/// Expect and eat. This macro eats whatever token it meets,
-/// regardless of whether it is a match or not.
-macro_rules! feed_expect {
-    ($tokens:ident, $parsed_tokens:ident, $body:tt) => {{
-        let token = $tokens.pop();
-
-        if token.is_none() {
-            $parsed_tokens.reverse();
-            $tokens.extend($parsed_tokens.into_iter());
-            return Incomplete;
-        }
-
-        expect!($tokens, $parsed_tokens, token, false, $body)
-    }}
-}
-
 /// expect and parse an enclosure.
 macro_rules! enclosure {
-    ($tokens:ident, $config:ident, $list:expr, $parsed_tokens:ident, {
-        $closing:tt $(|$any:tt)? => $expression:ident($($args:ident),*), $delimiter:tt => continue
+    ($list:expr, $parsed_tokens:ident, $tokens:ident, {
+        $closing:tt $(|$any:tt)? => $expression:ident($($args:ident),*) as $parse:tt, $($delimiter:tt)|+ => continue
     }) => {{
         let mut list = $list;
         let mut index = list.len();
@@ -122,15 +96,12 @@ macro_rules! enclosure {
 
             if index % 2 == 0 {
                 expect!($tokens, $parsed_tokens, {
-                    $delimiter => continue,
+                    $( $delimiter => continue, )+
                     $( ? => { stringify!($any); break } )?
                 });
             }
 
-            let expr = parse! {
-                $parsed_tokens;
-                parse_base($tokens, $config)
-            };
+            let expr = parse! $parse;
             list.push(expr);
         }
 
@@ -139,12 +110,39 @@ macro_rules! enclosure {
 }
 
 macro_rules! list {
-    ($tokens:ident, $config:ident, $body:tt) => {{
+    ($tokens:ident, $config:ident, {
+        $closing:tt $(|$any:tt)? => $expression:ident($($args:ident),*), $($delimiter:tt)|+ => continue
+    }) => {{
         let token = $tokens.pop().unwrap();
         let mut parsed_tokens = vec![token];
 
-        return Success(enclosure!($tokens, $config, vec![], parsed_tokens, $body), parsed_tokens)
+        let expr = enclosure!(vec![], parsed_tokens, $tokens, {
+
+            $closing $(|$any)? => $expression($($args),*) as {
+                parsed_tokens, $tokens, $config;
+                parse_primary_expr();
+                parse_binary_expr(0);
+
+                parse_eval_expr(false);
+                parse_block_expr()
+            },
+            $($delimiter)|+ => continue
+        });
+
+        return Success(expr, parsed_tokens)
     }};
+}
+
+macro_rules! eat_all {
+    ($tokens:expr, { $($token:pat_param)|+ }) => (
+        loop { match $tokens.last() {
+            // eat delimiter and semicolons
+            Some($( $token )|+) => {
+                $tokens.pop().unwrap();
+            }
+            _ => break
+        }}
+    );
 }
 
 pub fn parse(tokens: &[Token], parsed_tree: &[ASTNode], config: &mut Config) -> ParsingResult {
@@ -159,7 +157,7 @@ pub fn parse(tokens: &[Token], parsed_tree: &[ASTNode], config: &mut Config) -> 
         // look at the current token and determine what to parse
         // based on its value
         let token = match stack.last() {
-            Some(Delimiter) => break,
+            Some(Delimiter) => { stack.pop(); break }
             Some(token) => token.clone(),
             _ => break
         };
@@ -171,6 +169,8 @@ pub fn parse(tokens: &[Token], parsed_tree: &[ASTNode], config: &mut Config) -> 
     }
 
     stack.reverse();
+    // consume all delimiters at the end of line
+    eat_all!(stack, { Delimiter });
     Ok((ast, stack))
 }
 
@@ -182,8 +182,8 @@ fn parse_base(tokens: &mut Vec<Token>, config: &mut Config) -> ExpressionResult 
         parse_primary_expr();
         parse_binary_expr(0);
 
-        parse_block_expr();
-        parse_eval_expr()
+        parse_eval_expr(true);
+        parse_block_expr()
     };
 
     Success(expr, parsed_tokens)
@@ -201,6 +201,9 @@ fn parse_primary_expr(tokens: &mut Vec<Token>, config: &mut Config) -> Expressio
             StringLiteral(_) | FmtStringLiteral(_) | RegexLiteral(_) => {
                 parse_string_literal_expr(tokens, config)
             },
+            Do | OpeningCurlyBrace => {
+                parse_block_expr(tokens, config, GroupExpr(vec![]))
+            }
             // parenthesis expression ()
             OpeningParenthesis => {
                 list!(tokens, config, {
@@ -215,68 +218,107 @@ fn parse_primary_expr(tokens: &mut Vec<Token>, config: &mut Config) -> Expressio
                     Comma => continue
                 })
             },
-            // block expression {}
-            OpeningCurlyBrace => {
-                let args = vec![];
-                list!(tokens, config, {
-                    ClosingCurlyBrace => BlockExpr(args),
-                    Delimiter => continue
-                })
-            },
+            Delimiter => Incomplete,
+
             token => {
                 Failure(UnexpectedTokenError {
                     token: format!("{:?}", token)
                 })
             }
-        }
+        },
         None => Incomplete,
     }
 }
 
-fn parse_eval_expr(tokens: &mut Vec<Token>, config: &mut Config, lhs: Expression) -> ExpressionResult {
+fn parse_eval_expr(tokens: &mut Vec<Token>, config: &mut Config, explicit_call: bool, lhs: Expression) -> ExpressionResult {
     let mut parsed_tokens = Vec::new();
+    let mut result = lhs;
 
-    let result = match lhs {
-        EvalExpr(name) => {
+    if let EvalExpr(name) = result.clone() {
 
-            let args = match tokens.last() {
-                Some(Delimiter
-                     | Comma
-                     | ClosingParenthesis
-                     | ClosingBracket
-                     | ClosingCurlyBrace) => GroupExpr(vec![]),
-                _ => parse! {
-                    parsed_tokens, tokens, config;
-                    parse_primary_expr();
-                    parse_group_expr()
-                }
-            };
+        let expr = match tokens.last() {
 
-            // catch and parse potential access operation
-            let call = CallExpr(name, box args);
-            parse! {
+            Some(OpeningParenthesis) => parse! {
                 parsed_tokens;
-                parse_binary_expr(tokens, config, 0, call)
-            }
-        },
-        _ => lhs
+                parse_primary_expr(tokens, config)
+            },
+            Some(Comma) => {
+                return Success(result, parsed_tokens)
+            },
+
+            // in the inside of these expressions, function will not be called
+            // explicitly without explicit_call enabled
+            Some(Delimiter
+                 | Semicolon
+                 | ClosingParenthesis // of a group
+                 | ClosingBracket // of a list
+                 | ClosingCurlyBrace // of a block
+            ) if explicit_call => GroupExpr(vec![]),
+
+            // with explicit_call being true, EvalExpr will be parsed
+            // into a call expression, even without parentheses
+            _ if explicit_call => parse! {
+                parsed_tokens, tokens, config;
+                parse_primary_expr();
+                parse_opengroup(true)
+            },
+
+            _ => return Success(result, parsed_tokens),
+        };
+
+        // convert a group or a single argument into a list
+        let args = match expr {
+            GroupExpr(group) => group,
+            expr => vec![expr]
+        };
+
+        let call = CallExpr(name, args);
+
+        // catch and parse potential access operation
+        result = parse! {
+            parsed_tokens;
+            parse_binary_expr(tokens, config, 0, call)
+        };
     };
 
     Success(result, parsed_tokens)
 }
 
-fn parse_group_expr(tokens: &mut Vec<Token>, config: &mut Config, lhs: Expression) -> ExpressionResult {
+fn parse_opengroup(tokens: &mut Vec<Token>, config: &mut Config, eval: bool, lhs: Expression) -> ExpressionResult {
     let mut parsed_tokens = Vec::new();
 
-    let result = match tokens.last() {
-        Some(Comma) => {
-            enclosure!(tokens, config, vec![lhs], parsed_tokens, {
-                Delimiter | _ => GroupExpr(),
+    let mut result = match tokens.last() {
+        Some(Comma) => if eval {
+            enclosure!(vec![lhs], parsed_tokens, tokens, {
+                Delimiter | _ => GroupExpr() as {
+                    parsed_tokens, tokens, config;
+                    parse_primary_expr();
+                    parse_binary_expr(0);
+
+                    parse_eval_expr(false);
+                    parse_block_expr()
+                },
+                Comma => continue
+            })
+        } else {
+            enclosure!(vec![lhs], parsed_tokens, tokens, {
+                Delimiter | _ => GroupExpr() as {
+                    parsed_tokens;
+                    parse_primary_expr(tokens, config)
+                },
                 Comma => continue
             })
         },
         _ => lhs
     };
+
+    if ! eval { if let Some(Assignment) = tokens.last() {
+        // parse potential assignment operation
+        result = parse! {
+            parsed_tokens;
+            parse_binary_expr(tokens, config, 0, result)
+        }
+    }}
 
     Success(result, parsed_tokens)
 }
@@ -284,19 +326,39 @@ fn parse_group_expr(tokens: &mut Vec<Token>, config: &mut Config, lhs: Expressio
 fn parse_block_expr(tokens: &mut Vec<Token>, config: &mut Config, lhs: Expression) -> ExpressionResult {
     let mut parsed_tokens = Vec::new();
 
-    let result = match tokens.last() {
-        Some(OpeningCurlyBrace) => match lhs {
+    let mut forced = false;
+    let mut result = lhs;
 
-            GroupExpr(group) => {
-                enclosure!(tokens, config, vec![], parsed_tokens, {
-                    Delimiter | _ => BlockExpr(group),
-                    Comma => continue
+    expect!(tokens, parsed_tokens, {
+        Do => if let Some(OpeningParenthesis) = tokens.last() {
+            result = parse! {
+                parsed_tokens;
+                parse_primary_expr(tokens, config)
+            };
+            forced = true;
+        },
+        ? => ()
+    });
+
+    if let GroupExpr(args) = result.clone() {
+        result = match tokens.last() {
+            Some(OpeningCurlyBrace) => {
+                // eat opening token
+                let token = tokens.pop().unwrap();
+                parsed_tokens.push(token);
+
+                enclosure!(vec![], parsed_tokens, tokens, {
+                    ClosingCurlyBrace => BlockExpr(args) as {
+                        parsed_tokens;
+                        parse_base(tokens, config)
+                    },
+                    Delimiter | Semicolon => continue
                 })
             },
-            _ => lhs
-        }
-        _ => lhs
-    };
+            _ if forced => return Failure(MalformedDoExpression),
+            _ => result
+        };
+    }
 
     Success(result, parsed_tokens)
 }
@@ -346,9 +408,9 @@ fn parse_binary_expr(tokens: &mut Vec<Token>, config: &mut Config, precedence: i
                     let token = tokens.pop().unwrap();
                     parsed_tokens.push(token);
 
-                    let name = match lhs {
-                        EvalExpr(ref name) => name,
-                        _ => return Failure(InvalidAssignmentOperation)
+                    let list = match result {
+                        GroupExpr(group) => group,
+                        _ => vec![result]
                     };
 
                     let expr = parse! {
@@ -356,7 +418,7 @@ fn parse_binary_expr(tokens: &mut Vec<Token>, config: &mut Config, precedence: i
                         parse_base(tokens, config)
                     };
 
-                    result = AssignExpr(name.to_string(), box expr);
+                    result = AssignExpr(list, box expr);
                     break
                 },
                 _ => break
@@ -392,8 +454,13 @@ fn parse_binary_expr(tokens: &mut Vec<Token>, config: &mut Config, precedence: i
             rhs = binary_rhs;
         }
 
+        let args = match rhs {
+            GroupExpr(group) => group,
+            expr => vec![expr]
+        };
+
         // merge LHS and RHS
-        let call = CallExpr(operator, box rhs);
+        let call = CallExpr(operator, args);
         result = AccessExpr(box result, box call)
     }
 
@@ -406,8 +473,10 @@ fn parse_expression(tokens: &mut Vec<Token>, config: &mut Config) -> SnippetPars
     let effect = parse! {
         parsed_tokens, tokens, config;
         parse_base();
-        parse_group_expr()
+        parse_opengroup(false)
     };
+
+    eat_all!(tokens, { Delimiter | Semicolon });
 
     Success(EffectNode(effect), parsed_tokens)
 }

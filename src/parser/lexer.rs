@@ -47,7 +47,10 @@ pub enum Token {
     Delimiter,
     Apostrophe,
     Backquote,
+    Semicolon,
+
     Assignment,
+    Modify,
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
@@ -63,7 +66,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
         r"(?P<integer>\d+)|",
         r"(?P<operator>[\+\-\*\^\|&=/<>?!:]+)|",
         r"(?P<enclosure>[\(\)\[\]\{\}])|",
-        r"(?P<delimiter>[\n,])|",
+        r"(?P<delimiter>[\n,;])|",
         r"(?P<dot>\.+)|",
         r"(?P<string>('[^']*')|",
          "(?P<fmtstring>(\"[^\"]*\")|`[^`]*`))|",
@@ -141,6 +144,7 @@ fn match_token(bits: Captures) -> Result<Token, LexError> {
         }),
         ("delimiter", |token| Ok( match token {
             "," => Comma,
+            ";" => Semicolon,
              _  => Delimiter,
         }))
     ];

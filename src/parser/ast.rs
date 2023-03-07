@@ -21,9 +21,9 @@ pub enum Expression {
         body: Box<Expression>
     },
     EvalExpr(String),
-    AssignExpr(String, Box<Expression>),
+    AssignExpr(Vec<Expression>, Box<Expression>),
     AccessExpr(Box<Expression>, Box<Expression>),
-    CallExpr(String, Box<Expression>),
+    CallExpr(String, Vec<Expression>),
     BlockExpr(Vec<Expression>, Vec<Expression>),
     GroupExpr(Vec<Expression>),
     ListExpr(Vec<Expression>),

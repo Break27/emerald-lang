@@ -8,7 +8,8 @@ custom_error! { pub LexError
 
 custom_error! { pub ParseError
     UnexpectedTokenError { token: String } = "Unexpected token '{token}'.",
-    InvalidAssignmentOperation = "",
+    InvalidArgumentListError = "",
+    MalformedDoExpression = "",
     InvalidLiteralError = "Token provided is not a valid literal.",
     MissingExpectedTokenError { tokens: Vec<String> } = @{ format_missing_expected_token(tokens.clone(), "".to_string()) },
     UndefinedOperatorError { name: String } = "Unknown operator '{name}'.",
