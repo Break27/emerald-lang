@@ -136,7 +136,6 @@ macro_rules! list {
 macro_rules! eat_all {
     ($tokens:expr, { $($token:pat_param)|+ }) => (
         loop { match $tokens.last() {
-            // eat delimiter and semicolons
             Some($( $token )|+) => {
                 $tokens.pop().unwrap();
             }

@@ -9,6 +9,6 @@ edition = "2021"
 regex = "*"
 regex-macro = "*"
 custom_error = "*"
-llvm-sys = "150"
+llvm-sys = "130"
 docopt = "1.1.1"
-inkwell = { version = "0.1.1", features = ["llvm14-0"] }
+inkwell = { version = "0.1.1", features = ["llvm13-0"] }

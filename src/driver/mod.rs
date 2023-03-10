@@ -1,9 +1,7 @@
 use std::io::Write;
 use inkwell::context::Context;
-use inkwell::values::AsValueRef;
-use crate::compiler::codegen::IRBuilder;
 use crate::compiler::Compiler;
-use crate::parser::config::{default_parser_config, ParserConfiguration};
+use crate::parser::config::default_parser_config;
 use crate::parser::lexer::tokenize;
 use crate::parser::parse;
 
@@ -14,10 +12,7 @@ pub fn run() {
     let mut prev = Vec::new();
 
     let context = Context::create();
-    let builder = context.create_builder();
-    let module = context.create_module("main");
-
-    let mut compiler = Compiler::new(&context, &builder, &module);
+    let compiler = Compiler::new(&context, "main");
 
     loop {
         if prev.is_empty() { print!("iem> ") } else { print!("...> ") }
@@ -52,10 +47,10 @@ pub fn run() {
             }
         }
 
-        match ast.codegen(&&mut compiler) {
-            Ok(result) => println!("{:?}", result.as_value_ref()),
+        match compiler.compile(&ast) {
+            Ok(result) => println!("{:?}", result),
             Err(e) => println!("Error: {}", e)
-        };
+        }
 
         ast.clear();
     }
